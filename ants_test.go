@@ -708,6 +708,171 @@ func TestMaxBlockingSubmitWithFuncGeneric(t *testing.T) {
 	}
 }
 
+func TestSubmitTimeout(t *testing.T) {
+	poolSize := 2
+	p, err := ants.NewPool(poolSize)
+	require.NoErrorf(t, err, "create Pool failed: %v", err)
+	defer p.Release()
+
+	ch := make(chan struct{})
+	blockingFunc := func() { <-ch }
+	for i := 0; i < poolSize; i++ {
+		require.NoError(t, p.Submit(blockingFunc), "submit when pool is not full shouldn't return error")
+	}
+
+	// The pool is full now, a timed-out submit should return ants.ErrTimeout.
+	start := time.Now()
+	err = p.SubmitTimeout(demoFunc, 200*time.Millisecond)
+	require.ErrorIsf(t, err, ants.ErrTimeout, "submit with timeout when pool is full should get an ants.ErrTimeout")
+	require.GreaterOrEqual(t, time.Since(start), 200*time.Millisecond, "submit with timeout should wait until the deadline")
+	require.EqualValues(t, 0, p.Waiting(), "waiting count should be back to 0 after the submit timed out")
+
+	// Free the workers, the subsequent submits should work as usual.
+	close(ch)
+	require.NoError(t, p.SubmitTimeout(demoFunc, time.Second), "submit with timeout after workers are freed shouldn't return error")
+}
+
+func TestSubmitTimeoutSuccessBeforeDeadline(t *testing.T) {
+	poolSize := 1
+	p, err := ants.NewPool(poolSize)
+	require.NoErrorf(t, err, "create Pool failed: %v", err)
+	defer p.Release()
+
+	ch := make(chan struct{})
+	require.NoError(t, p.Submit(func() { <-ch }), "submit when pool is not full shouldn't return error")
+
+	// The pool is full now, but the worker will be freed before the deadline.
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		close(ch)
+	}()
+	var executed atomic.Bool
+	doneCh := make(chan struct{})
+	require.NoError(t, p.SubmitTimeout(func() { executed.Store(true); close(doneCh) }, 3*time.Second),
+		"submit with timeout should succeed before the deadline")
+	<-doneCh
+	require.True(t, executed.Load(), "the submitted task should have been executed")
+	require.EqualValues(t, 0, p.Waiting(), "waiting count should be back to 0 after the submit succeeded")
+}
+
+func TestInvokeTimeout(t *testing.T) {
+	poolSize := 2
+	ch := make(chan struct{})
+	var wg sync.WaitGroup
+	p, err := ants.NewPoolWithFunc(poolSize, func(i any) {
+		<-i.(chan struct{})
+		wg.Done()
+	})
+	require.NoErrorf(t, err, "create PoolWithFunc failed: %v", err)
+	defer p.Release()
+
+	wg.Add(poolSize)
+	for i := 0; i < poolSize; i++ {
+		require.NoError(t, p.Invoke(ch), "invoke when pool is not full shouldn't return error")
+	}
+
+	// The pool is full now, a timed-out invoke should return ants.ErrTimeout.
+	start := time.Now()
+	err = p.InvokeTimeout(ch, 200*time.Millisecond)
+	require.ErrorIsf(t, err, ants.ErrTimeout, "invoke with timeout when pool is full should get an ants.ErrTimeout")
+	require.GreaterOrEqual(t, time.Since(start), 200*time.Millisecond, "invoke with timeout should wait until the deadline")
+	require.EqualValues(t, 0, p.Waiting(), "waiting count should be back to 0 after the invoke timed out")
+
+	// Free the workers, the subsequent invokes should work as usual.
+	close(ch)
+	wg.Wait()
+	wg.Add(1)
+	require.NoError(t, p.InvokeTimeout(ch, time.Second), "invoke with timeout after workers are freed shouldn't return error")
+	wg.Wait()
+}
+
+func TestInvokeTimeoutSuccessBeforeDeadline(t *testing.T) {
+	poolSize := 1
+	ch := make(chan struct{})
+	releaseCh := make(chan struct{})
+	var wg sync.WaitGroup
+	p, err := ants.NewPoolWithFunc(poolSize, func(i any) {
+		if c, ok := i.(chan struct{}); ok {
+			<-c
+		}
+		wg.Done()
+	})
+	require.NoErrorf(t, err, "create PoolWithFunc failed: %v", err)
+	defer p.Release()
+
+	wg.Add(1)
+	require.NoError(t, p.Invoke(releaseCh), "invoke when pool is not full shouldn't return error")
+
+	// The pool is full now, but the worker will be freed before the deadline.
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		close(releaseCh)
+	}()
+	wg.Add(1)
+	require.NoError(t, p.InvokeTimeout(ch, 3*time.Second), "invoke with timeout should succeed before the deadline")
+	close(ch)
+	wg.Wait()
+	require.EqualValues(t, 0, p.Waiting(), "waiting count should be back to 0 after the invoke succeeded")
+}
+
+func TestInvokeTimeoutGeneric(t *testing.T) {
+	poolSize := 2
+	ch := make(chan struct{})
+	var wg sync.WaitGroup
+	p, err := ants.NewPoolWithFuncGeneric(poolSize, func(c chan struct{}) {
+		<-c
+		wg.Done()
+	})
+	require.NoErrorf(t, err, "create PoolWithFuncGeneric failed: %v", err)
+	defer p.Release()
+
+	wg.Add(poolSize)
+	for i := 0; i < poolSize; i++ {
+		require.NoError(t, p.Invoke(ch), "invoke when pool is not full shouldn't return error")
+	}
+
+	// The pool is full now, a timed-out invoke should return ants.ErrTimeout.
+	start := time.Now()
+	err = p.InvokeTimeout(ch, 200*time.Millisecond)
+	require.ErrorIsf(t, err, ants.ErrTimeout, "invoke with timeout when pool is full should get an ants.ErrTimeout")
+	require.GreaterOrEqual(t, time.Since(start), 200*time.Millisecond, "invoke with timeout should wait until the deadline")
+	require.EqualValues(t, 0, p.Waiting(), "waiting count should be back to 0 after the invoke timed out")
+
+	// Free the workers, the subsequent invokes should work as usual.
+	close(ch)
+	wg.Wait()
+	wg.Add(1)
+	require.NoError(t, p.InvokeTimeout(ch, time.Second), "invoke with timeout after workers are freed shouldn't return error")
+	wg.Wait()
+}
+
+func TestInvokeTimeoutGenericSuccessBeforeDeadline(t *testing.T) {
+	poolSize := 1
+	releaseCh := make(chan struct{})
+	var wg sync.WaitGroup
+	p, err := ants.NewPoolWithFuncGeneric(poolSize, func(c chan struct{}) {
+		<-c
+		wg.Done()
+	})
+	require.NoErrorf(t, err, "create PoolWithFuncGeneric failed: %v", err)
+	defer p.Release()
+
+	wg.Add(1)
+	require.NoError(t, p.Invoke(releaseCh), "invoke when pool is not full shouldn't return error")
+
+	// The pool is full now, but the worker will be freed before the deadline.
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		close(releaseCh)
+	}()
+	doneCh := make(chan struct{})
+	wg.Add(1)
+	require.NoError(t, p.InvokeTimeout(doneCh, 3*time.Second), "invoke with timeout should succeed before the deadline")
+	close(doneCh)
+	wg.Wait()
+	require.EqualValues(t, 0, p.Waiting(), "waiting count should be back to 0 after the invoke succeeded")
+}
+
 func TestRebootDefaultPool(t *testing.T) {
 	defer ants.Release()
 	ants.Reboot() // should do nothing inside

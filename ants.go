@@ -547,6 +547,70 @@ retry:
 	goto retry
 }
 
+// retrieveWorkerWithTimeout is like retrieveWorker, but it waits for an available
+// worker at most the given timeout instead of blocking indefinitely, and returns
+// ErrTimeout once the deadline is exceeded.
+func (p *poolCommon) retrieveWorkerWithTimeout(timeout time.Duration) (w worker, err error) {
+	expiry := time.Now().Add(timeout)
+	p.lock.Lock()
+
+retry:
+	// First try to fetch the worker from the queue.
+	if w = p.workers.detach(); w != nil {
+		p.lock.Unlock()
+		return
+	}
+
+	// If the worker queue is empty, and we don't run out of the pool capacity,
+	// then just spawn a new worker goroutine.
+	if capacity := p.Cap(); capacity == -1 || capacity > p.Running() {
+		w = p.workerCache.Get().(worker)
+		w.run()
+		p.lock.Unlock()
+		return
+	}
+
+	// Bail out early if it's in nonblocking mode or the number of pending callers reaches the maximum limit value.
+	if p.options.Nonblocking || (p.options.MaxBlockingTasks != 0 && p.Waiting() >= p.options.MaxBlockingTasks) {
+		p.lock.Unlock()
+		return nil, ErrPoolOverload
+	}
+
+	remaining := time.Until(expiry)
+	if remaining <= 0 {
+		p.lock.Unlock()
+		return nil, ErrTimeout
+	}
+
+	// Block and wait for an available worker, but no longer than the remaining time.
+	// The timer broadcasts on the condition variable at the deadline, so the caller
+	// is always woken up and never leaks, even if no worker is ever put back.
+	timedOut := false
+	timer := time.AfterFunc(remaining, func() {
+		p.lock.Lock()
+		timedOut = true
+		p.cond.Broadcast()
+		p.lock.Unlock()
+	})
+
+	p.addWaiting(1)
+	p.cond.Wait() // block and wait for an available worker or the deadline
+	p.addWaiting(-1)
+	timer.Stop()
+
+	if timedOut {
+		p.lock.Unlock()
+		return nil, ErrTimeout
+	}
+
+	if p.IsClosed() {
+		p.lock.Unlock()
+		return nil, ErrPoolClosed
+	}
+
+	goto retry
+}
+
 // revertWorker puts a worker back into free pool, recycling the goroutines.
 func (p *poolCommon) revertWorker(worker worker) bool {
 	if capacity := p.Cap(); (capacity > 0 && p.Running() > capacity) || p.IsClosed() {

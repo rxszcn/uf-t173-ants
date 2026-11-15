@@ -22,6 +22,8 @@
 
 package ants
 
+import "time"
+
 // PoolWithFuncGeneric is the generic version of PoolWithFunc.
 type PoolWithFuncGeneric[T any] struct {
 	*poolCommon
@@ -37,6 +39,21 @@ func (p *PoolWithFuncGeneric[T]) Invoke(arg T) error {
 	}
 
 	w, err := p.retrieveWorker()
+	if w != nil {
+		w.(*goWorkerWithFuncGeneric[T]).arg <- arg
+	}
+	return err
+}
+
+// InvokeTimeout is like Invoke, but it waits for an available worker at most
+// the given timeout instead of blocking indefinitely once the pool is full,
+// and returns ErrTimeout when the deadline is exceeded.
+func (p *PoolWithFuncGeneric[T]) InvokeTimeout(arg T, timeout time.Duration) error {
+	if p.IsClosed() {
+		return ErrPoolClosed
+	}
+
+	w, err := p.retrieveWorkerWithTimeout(timeout)
 	if w != nil {
 		w.(*goWorkerWithFuncGeneric[T]).arg <- arg
 	}

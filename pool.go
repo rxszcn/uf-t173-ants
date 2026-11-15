@@ -22,6 +22,8 @@
 
 package ants
 
+import "time"
+
 // Pool is a goroutine pool that limits and recycles a mass of goroutines.
 // The pool capacity can be fixed or unlimited.
 type Pool struct {
@@ -40,6 +42,21 @@ func (p *Pool) Submit(task func()) error {
 	}
 
 	w, err := p.retrieveWorker()
+	if w != nil {
+		w.inputFunc(task)
+	}
+	return err
+}
+
+// SubmitTimeout is like Submit, but it waits for an available worker at most
+// the given timeout instead of blocking indefinitely once the pool is full,
+// and returns ErrTimeout when the deadline is exceeded.
+func (p *Pool) SubmitTimeout(task func(), timeout time.Duration) error {
+	if p.IsClosed() {
+		return ErrPoolClosed
+	}
+
+	w, err := p.retrieveWorkerWithTimeout(timeout)
 	if w != nil {
 		w.inputFunc(task)
 	}

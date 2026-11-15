@@ -22,6 +22,8 @@
 
 package ants
 
+import "time"
+
 // PoolWithFunc is like Pool but accepts a unified function for all goroutines to execute.
 type PoolWithFunc struct {
 	*poolCommon
@@ -42,6 +44,21 @@ func (p *PoolWithFunc) Invoke(arg any) error {
 	}
 
 	w, err := p.retrieveWorker()
+	if w != nil {
+		w.inputArg(arg)
+	}
+	return err
+}
+
+// InvokeTimeout is like Invoke, but it waits for an available worker at most
+// the given timeout instead of blocking indefinitely once the pool is full,
+// and returns ErrTimeout when the deadline is exceeded.
+func (p *PoolWithFunc) InvokeTimeout(arg any, timeout time.Duration) error {
+	if p.IsClosed() {
+		return ErrPoolClosed
+	}
+
+	w, err := p.retrieveWorkerWithTimeout(timeout)
 	if w != nil {
 		w.inputArg(arg)
 	}
